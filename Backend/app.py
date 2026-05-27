@@ -215,20 +215,60 @@ async def generate_questions(candidate_id: str):
 async def process_answer(
     candidate_id: str, 
     question_index: int = Form(...), 
-    audio_file: UploadFile = File(...)
+    answer_text: str = Form(None),
+    audio_file: UploadFile = File(None)
 ):
     print(f"\n=== PROCESS ANSWER CALLED ===")
     print(f"Candidate ID: {candidate_id}")
     print(f"Question Index: {question_index}")
-    print(f"Audio File: {audio_file.filename}, Size: {audio_file.size}")
+    print(f"Answer Text provided: {answer_text is not None}")
+    print(f"Audio File provided: {audio_file is not None}")
+    
+    transcript = None
+    filler_count = 0
     
     try:
-        # 1. Check if Whisper is available
-        if not WHISPER_AVAILABLE:
-            print("ERROR: Whisper not available")
-            return {"error": "Whisper module not available. Please install openai-whisper."}
+        # 1. Get transcript - either from text (Web Speech API) or from audio file (Whisper)
+        if answer_text:
+            # Use text provided from Web Speech API
+            transcript = answer_text
+            print(f"Using provided text transcript: {transcript[:100]}...")
+        elif audio_file:
+            # Fall back to Whisper for audio files
+            if not WHISPER_AVAILABLE:
+                print("ERROR: Whisper not available")
+                return {"error": "Whisper module not available. Please install openai-whisper."}
+            
+            print(f"Audio File: {audio_file.filename}, Size: {audio_file.size}")
+            
+            # Process the audio
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
+                shutil.copyfileobj(audio_file.file, temp_audio)
+                temp_file_path = temp_audio.name
+
+            print(f"Audio saved to: {temp_file_path}")
+            
+            model = get_whisper_model()
+            result = model.transcribe(
+                temp_file_path,
+                initial_prompt="Um, uh, well, like, you know, I literally mean, basically..."
+            )
+            transcript = result["text"]
+            print(f"Transcript from Whisper: {transcript[:100]}...")
+            os.remove(temp_file_path)
+        else:
+            return {"error": "Either answer_text or audio_file must be provided."}
         
-        # 2. Fetch the actual question from Supabase so the AI knows what to grade
+        # 2. Count filler words in transcript
+        clean_words = re.findall(r'\b\w+\b', transcript.lower())
+        filler_words = ["um", "uh", "like", "literally", "basically", "well", "hmm", "ah", "you know"]
+        filler_count = sum(1 for word in clean_words if word in filler_words)
+        
+        penalty = filler_count * 5
+        confidence_score = max(0, 100 - penalty)
+        print(f"Filler words: {filler_count}, Confidence: {confidence_score}")
+        
+        # 3. Fetch the actual question from Supabase so the AI knows what to grade
         candidate_res = supabase.table('candidates').select('generated_questions').eq('id', candidate_id).execute()
         if not candidate_res.data or not candidate_res.data[0].get('generated_questions'):
             print(f"ERROR: Questions not found for candidate {candidate_id}")
@@ -242,30 +282,6 @@ async def process_answer(
             
         question_text = questions_list[question_index]
         print(f"Question: {question_text[:100]}...")
-
-        # 3. Process the audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
-            shutil.copyfileobj(audio_file.file, temp_audio)
-            temp_file_path = temp_audio.name
-
-        print(f"Audio saved to: {temp_file_path}")
-        
-        model = get_whisper_model()
-        result = model.transcribe(
-            temp_file_path,
-            initial_prompt="Um, uh, well, like, you know, I literally mean, basically..."
-        )
-        transcript = result["text"]
-        print(f"Transcript: {transcript[:100]}...")
-
-        clean_words = re.findall(r'\b\w+\b', transcript.lower())
-        filler_words = ["um", "uh", "like", "literally", "basically", "well", "hmm", "ah", "you know"]
-        filler_count = sum(1 for word in clean_words if word in filler_words)
-        
-        penalty = filler_count * 5
-        confidence_score = max(0, 100 - penalty)
-        os.remove(temp_file_path)
-        print(f"Filler words: {filler_count}, Confidence: {confidence_score}")
 
         # 4. THE AI JUDGE: Grade the answer using Llama 3
         evaluation_prompt = f"""
