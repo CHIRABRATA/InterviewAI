@@ -33,14 +33,20 @@ export default function InterviewArena() {
         
         console.log("Questions loaded:", data);
         
-        if (data.questions && data.questions.length > 0) {
+        if (data.error) {
+          console.error("Backend error:", data.error);
+          if (data.debug) console.error("Debug info:", data.debug);
+          return;
+        }
+        
+        if (data.questions && Array.isArray(data.questions) && data.questions.length > 0) {
           setQuestions(data.questions);
           // Speak first question after a short delay
           setTimeout(() => {
             speakQuestion(data.questions[0]);
           }, 500);
         } else {
-          console.error("No questions found:", data);
+          console.error("No questions found or invalid format:", data);
         }
       } catch (error) {
         console.error("Failed to load questions:", error);
@@ -166,7 +172,7 @@ export default function InterviewArena() {
     return new Promise((resolve) => {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.onstop = async () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" });
+          const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
           await submitAnswer(audioBlob);
           resolve();
         };
@@ -179,11 +185,18 @@ export default function InterviewArena() {
 
   // Submit answer for grading
   const submitAnswer = async (audioBlob) => {
+    console.log("submitAnswer called with blob size:", audioBlob.size);
     setSubmitted(true);
 
     const formData = new FormData();
     formData.append("audio_file", audioBlob);
     formData.append("question_index", currentQuestionIndex);
+
+    console.log("Sending to backend:", {
+      candidate_id: candidateId,
+      question_index: currentQuestionIndex,
+      audio_size: audioBlob.size,
+    });
 
     try {
       const response = await fetch(
@@ -195,9 +208,13 @@ export default function InterviewArena() {
       );
 
       const data = await response.json();
+      console.log("Backend response:", data);
+      
       if (data.evaluation) {
         setEvaluation(data.evaluation);
         setAllScores((prev) => [...prev, data.evaluation.score_out_of_10]);
+      } else if (data.error) {
+        console.error("Backend error:", data.error);
       }
     } catch (error) {
       console.error("Failed to submit answer:", error);
@@ -211,17 +228,29 @@ export default function InterviewArena() {
 
   const handleSkip = () => {
     if (!submitted) {
-      setSubmitted(true);
-      setEvaluation({
-        score_out_of_10: 0,
-        accuracy_level: "Skipped",
-        technical_feedback: "No response provided within time limit.",
-        communication_feedback: "Question was skipped due to timeout.",
-      });
-      setAllScores((prev) => [...prev, 0]);
-      setShowCountdown(true);
-      setCountdownActive(true);
-      setCountdownValue(5);
+      // Stop recording first if still going
+      if (isRecording && mediaRecorderRef.current) {
+        mediaRecorderRef.current.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+          submitAnswer(audioBlob);
+        };
+        mediaRecorderRef.current.stop();
+        mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop());
+        setIsRecording(false);
+      } else {
+        // If not recording, just create skip evaluation
+        setSubmitted(true);
+        setEvaluation({
+          score_out_of_10: 0,
+          accuracy_level: "Skipped",
+          technical_feedback: "No response provided within time limit.",
+          communication_feedback: "Question was skipped due to timeout.",
+        });
+        setAllScores((prev) => [...prev, 0]);
+        setShowCountdown(true);
+        setCountdownActive(true);
+        setCountdownValue(5);
+      }
     }
   };
 
