@@ -1,0 +1,7 @@
+# Web Framework & File Uploads
+fastapi
+uvicorn[standard]
+python-multipart
+
+# PDF Parsing
+pdfplumber
