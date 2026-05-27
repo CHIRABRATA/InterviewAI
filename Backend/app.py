@@ -9,6 +9,10 @@ import shutil
 import tempfile
 from fastapi import Form
 import re
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add CORS middleware
+
 
 # Try to import whisper, but make it optional
 try:
@@ -29,6 +33,13 @@ supabase: Client = create_client(url, key)
 
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Lazy-load Whisper model on first use
 whisper_model = None
@@ -193,10 +204,10 @@ async def process_answer(
             shutil.copyfileobj(audio_file.file, temp_audio)
             temp_file_path = temp_audio.name
 
-        # Get the Whisper model (lazy-loaded on first use)
+        # Get the Whisper model
         model = get_whisper_model()
         
-        # Transcribe with an initial prompt to preserve filler words
+        # Transcribe
         result = model.transcribe(
             temp_file_path,
             initial_prompt="Um, uh, well, like, you know, I literally mean, basically..."
@@ -205,16 +216,38 @@ async def process_answer(
 
         # Extract words and detect filler words
         clean_words = re.findall(r'\b\w+\b', transcript.lower())
-        
         filler_words = ["um", "uh", "like", "literally", "basically", "well", "hmm", "ah", "you know"]
         filler_count = sum(1 for word in clean_words if word in filler_words)
         
-        # Calculate confidence score: each filler word reduces score by 5 points
+        # Calculate confidence score
         penalty = filler_count * 5
         confidence_score = max(0, 100 - penalty)
 
-        # Clean up temporary file
+        # Clean up temporary file early
         os.remove(temp_file_path)
+
+        # ---------------------------------------------------------
+        # NEW: Ask Llama 3 to generate personalized feedback
+        # ---------------------------------------------------------
+        feedback_prompt = f"""
+        You are an expert technical interview coach. Review the candidate's transcribed answer below.
+        
+        Candidate Answer: "{transcript}"
+        Filler words used: {filler_count}
+
+        Provide exactly 1 to 2 sentences of constructive feedback. 
+        Focus on their clarity, confidence, and content. If they used a lot of filler words, gently suggest taking a pause instead. 
+        Do NOT include any greetings or extra formatting. Just return the feedback directly.
+        """
+        
+        try:
+            llm_response = ollama.chat(
+                model='llama3', 
+                messages=[{'role': 'user', 'content': feedback_prompt}]
+            )
+            ai_feedback = llm_response['message']['content'].strip()
+        except Exception as e:
+            ai_feedback = "AI feedback generation failed, but your audio was recorded successfully."
 
         # Return analysis results
         return {
@@ -226,12 +259,13 @@ async def process_answer(
                 "filler_words_detected": filler_count,
                 "filler_word_percentage": round((filler_count / len(clean_words) * 100) if clean_words else 0, 2),
                 "estimated_confidence_score": confidence_score,
-                "feedback": "Reduce filler words like 'um', 'uh', 'like' to sound more confident!" if filler_count > 3 else "Good speech fluency!"
+                "feedback": ai_feedback  
             }
         }
 
     except Exception as e:
         return {"error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
