@@ -5,6 +5,19 @@ import json
 import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import shutil
+import tempfile
+from fastapi import Form
+import re
+
+# Try to import whisper, but make it optional
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    whisper = None
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,7 +27,19 @@ url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
+
 app = FastAPI()
+
+# Lazy-load Whisper model on first use
+whisper_model = None
+
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        print("Loading Whisper model... this might take a few seconds.")
+        whisper_model = whisper.load_model("base")
+        print("Whisper model loaded!")
+    return whisper_model
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Interview AI Backend!"}
@@ -151,6 +176,62 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         return {"error": str(e)}
 
+
+@app.post("/process-answer/{candidate_id}")
+async def process_answer(
+    candidate_id: str, 
+    question_index: int = Form(...), 
+    audio_file: UploadFile = File(...)
+):
+    try:
+        # Check if Whisper is available
+        if not WHISPER_AVAILABLE:
+            return {"error": "Whisper module not available. Please install openai-whisper."}
+        
+        # Create a temporary file for the audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+            shutil.copyfileobj(audio_file.file, temp_audio)
+            temp_file_path = temp_audio.name
+
+        # Get the Whisper model (lazy-loaded on first use)
+        model = get_whisper_model()
+        
+        # Transcribe with an initial prompt to preserve filler words
+        result = model.transcribe(
+            temp_file_path,
+            initial_prompt="Um, uh, well, like, you know, I literally mean, basically..."
+        )
+        transcript = result["text"]
+
+        # Extract words and detect filler words
+        clean_words = re.findall(r'\b\w+\b', transcript.lower())
+        
+        filler_words = ["um", "uh", "like", "literally", "basically", "well", "hmm", "ah", "you know"]
+        filler_count = sum(1 for word in clean_words if word in filler_words)
+        
+        # Calculate confidence score: each filler word reduces score by 5 points
+        penalty = filler_count * 5
+        confidence_score = max(0, 100 - penalty)
+
+        # Clean up temporary file
+        os.remove(temp_file_path)
+
+        # Return analysis results
+        return {
+            "status": "success",
+            "question_index": question_index,
+            "transcript": transcript,
+            "analytics": {
+                "total_words": len(clean_words),
+                "filler_words_detected": filler_count,
+                "filler_word_percentage": round((filler_count / len(clean_words) * 100) if clean_words else 0, 2),
+                "estimated_confidence_score": confidence_score,
+                "feedback": "Reduce filler words like 'um', 'uh', 'like' to sound more confident!" if filler_count > 3 else "Good speech fluency!"
+            }
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

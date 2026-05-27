@@ -3,5 +3,17 @@ fastapi
 uvicorn[standard]
 python-multipart
 
+# Database
+supabase
+
 # PDF Parsing
 pdfplumber
+
+# AI & ML
+ollama
+openai-whisper
+torch
+numpy
+
+# Utilities
+python-dotenv
