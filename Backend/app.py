@@ -11,7 +11,7 @@ from fastapi import Form
 import re
 from fastapi.middleware.cors import CORSMiddleware
 
-# Try to import whisper, but make it optional
+
 try:
     import whisper
     WHISPER_AVAILABLE = True
