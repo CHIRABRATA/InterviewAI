@@ -145,9 +145,13 @@ async def generate_questions(candidate_id: str):
         Experience: {candidate_data.get('experience')}
 
         Generate exactly 10 interview questions for this candidate. 
-        - 2 Introduction/Behavioral questions.
+        - 1 Introduction/Behavioral questions.
         - 5 Technical questions based specifically on their skills and projects.
-        - 3 Scenario-based/Problem-solving questions.
+        - 4 Scenario-based/Problem-solving questions.
+        -the question is like easy to advanceed question like 1st question is basic question and 10th question is advanceed question and the question is based on candidate resume
+         - and the question is also based on realtion of word not exact word match.
+         - make the question very good standard for candidate like if he have real interview then most question ask for this ai interview
+        -  make the question story format some time you ask question by giving scenario and some time you ask direct question but all question is based on candidate resume
 
         You MUST return ONLY a valid JSON array of strings. Do not include any formatting or explanations.
         
