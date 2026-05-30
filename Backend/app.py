@@ -49,6 +49,7 @@ def get_whisper_model():
         print("Whisper model loaded!")
     return whisper_model
 
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Interview AI Backend!"}
@@ -165,33 +166,32 @@ async def generate_questions(candidate_id: str):
             format='json'
         )
 
-        # 4. Parse the AI response
+        # 4. Parse the AI response (Bulletproof Parsing)
         ai_response_text = response['message']['content']
-        print(f"DEBUG: Raw AI response: {ai_response_text[:200]}")  # Log first 200 chars
+        print(f"DEBUG: Raw AI response: {ai_response_text[:200]}")  
         
         parsed_response = json.loads(ai_response_text)
-        print(f"DEBUG: Parsed response type: {type(parsed_response)}, keys: {parsed_response.keys() if isinstance(parsed_response, dict) else 'N/A'}")
+        print(f"DEBUG: Parsed response type: {type(parsed_response)}")
         
-        # Handle multiple possible response formats from AI
-        questions_array = None
+        questions_array = []
         
         if isinstance(parsed_response, list):
-            # Direct array
             questions_array = parsed_response
         elif isinstance(parsed_response, dict):
-            # Check for various possible keys
-            if "questions" in parsed_response:
+            if "questions" in parsed_response and isinstance(parsed_response["questions"], list):
                 questions_array = parsed_response["questions"]
-            elif len(parsed_response) == 1:
-                # Single key dict, grab its value
-                value = list(parsed_response.values())[0]
-                if isinstance(value, list):
-                    questions_array = value
+            else:
+                # Flatten any categories Llama 3 might have made
+                for key, value in parsed_response.items():
+                    if isinstance(value, list):
+                        questions_array.extend(value)
         
-
-        if not questions_array or not isinstance(questions_array, list) or len(questions_array) == 0:
+        if not questions_array or len(questions_array) == 0:
             print(f"ERROR: Could not extract questions array. Raw: {ai_response_text}")
             return {"error": "AI returned unexpected format for questions.", "debug": ai_response_text[:500]}
+
+        # Force exactly 10 questions max
+        questions_array = questions_array[:10]
 
         # 5. Save the questions to Supabase so we have a record of the interview
         supabase.table('candidates').update({
@@ -221,46 +221,57 @@ async def process_answer(
     print(f"\n=== PROCESS ANSWER CALLED ===")
     print(f"Candidate ID: {candidate_id}")
     print(f"Question Index: {question_index}")
-    print(f"Answer Text provided: {answer_text is not None}")
-    print(f"Audio File provided: {audio_file is not None}")
     
-    transcript = None
+    transcript = ""
     filler_count = 0
     
     try:
         # 1. Get transcript - either from text (Web Speech API) or from audio file (Whisper)
         if answer_text:
-            # Use text provided from Web Speech API
             transcript = answer_text
             print(f"Using provided text transcript: {transcript[:100]}...")
         elif audio_file:
-            # Fall back to Whisper for audio files
             if not WHISPER_AVAILABLE:
-                print("ERROR: Whisper not available")
                 return {"error": "Whisper module not available. Please install openai-whisper."}
             
-            print(f"Audio File: {audio_file.filename}, Size: {audio_file.size}")
-            
-            # Process the audio
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
                 shutil.copyfileobj(audio_file.file, temp_audio)
                 temp_file_path = temp_audio.name
 
-            print(f"Audio saved to: {temp_file_path}")
-            
             model = get_whisper_model()
             result = model.transcribe(
                 temp_file_path,
                 initial_prompt="Um, uh, well, like, you know, I literally mean, basically..."
             )
-            transcript = result["text"]
+            transcript = result["text"].strip()
             print(f"Transcript from Whisper: {transcript[:100]}...")
             os.remove(temp_file_path)
         else:
             return {"error": "Either answer_text or audio_file must be provided."}
         
-        # 2. Count filler words in transcript
+        # 2. Count words and SHORT-CIRCUIT if silence
         clean_words = re.findall(r'\b\w+\b', transcript.lower())
+        
+        if len(clean_words) < 3:
+            print("Transcript too short or empty. Skipping Llama 3 evaluation.")
+            return {
+                "status": "success",
+                "question_index": question_index,
+                "transcript": transcript,
+                "analytics": {
+                    "total_words": len(clean_words),
+                    "filler_words_detected": 0,
+                    "estimated_confidence_score": 0,
+                },
+                "evaluation": {
+                    "score_out_of_10": 0,
+                    "accuracy_level": "Skipped",
+                    "technical_feedback": "No audible answer was detected.",
+                    "communication_feedback": "Please speak clearly into the microphone."
+                }
+            }
+            
+        # 3. Count filler words
         filler_words = ["um", "uh", "like", "literally", "basically", "well", "hmm", "ah", "you know"]
         filler_count = sum(1 for word in clean_words if word in filler_words)
         
@@ -268,24 +279,25 @@ async def process_answer(
         confidence_score = max(0, 100 - penalty)
         print(f"Filler words: {filler_count}, Confidence: {confidence_score}")
         
-        # 3. Fetch the actual question from Supabase so the AI knows what to grade
+        # 4. Fetch the actual question from Supabase
         candidate_res = supabase.table('candidates').select('generated_questions').eq('id', candidate_id).execute()
         if not candidate_res.data or not candidate_res.data[0].get('generated_questions'):
-            print(f"ERROR: Questions not found for candidate {candidate_id}")
             return {"error": "Questions not found for this candidate."}
             
         questions_list = candidate_res.data[0]['generated_questions']
         
         if question_index >= len(questions_list):
-            print(f"ERROR: Question index {question_index} out of range (total: {len(questions_list)})")
             return {"error": "Question index out of range."}
             
         question_text = questions_list[question_index]
-        print(f"Question: {question_text[:100]}...")
 
-        # 4. THE AI JUDGE: Grade the answer using Llama 3
+        # 5. THE AI JUDGE: Grade the answer using Llama 3
         evaluation_prompt = f"""
         You are a strict but fair Senior Technical Interviewer. Evaluate the candidate's answer.
+        mostly its technical interview so the ans turms are also technical.
+        like candidate say rag you hare dag so you judge the word by whole answer not exact word match.
+        if candidate say rag you hare dag and the answer is correct then you give full score but if candidate say rag you hare dag and the answer is wrong .
+        always judge by realtion of word not exact word match.
         
         Interview Question: "{question_text}"
         Candidate's Answer: "{transcript}"
@@ -298,7 +310,7 @@ async def process_answer(
         
         Required JSON structure:
         {{
-            "score_out_of_10": 0,
+            "score_out_of_5": 0,
             "accuracy_level": "Correct", 
             "technical_feedback": "Explain exactly what they got right, what was wrong, and what they missed.",
             "communication_feedback": "Brief note on their delivery and filler word usage."
@@ -312,17 +324,17 @@ async def process_answer(
                 format='json'  # Force strict JSON output
             )
             ai_evaluation = json.loads(llm_response['message']['content'])
-            print(f"AI Evaluation: Score={ai_evaluation.get('score_out_of_10')}")
+            print(f"AI Evaluation: Score={ai_evaluation.get('score_out_of_5')}")
         except Exception as e:
             print(f"ERROR in AI grading: {str(e)}")
             ai_evaluation = {
-                "score_out_of_10": 0,
+                "score_out_of_5": 0,
                 "accuracy_level": "Error",
                 "technical_feedback": "AI grading failed to generate properly.",
                 "communication_feedback": "N/A"
             }
 
-        # 5. Return complete analysis
+        # 6. Return complete analysis
         result = {
             "status": "success",
             "question_index": question_index,
